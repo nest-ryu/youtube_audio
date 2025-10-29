@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-유튜브 채널 영상 MP3 다운로더
+유튜브 채널 영상 MP3 다운로더 - Streamlit 버전
 채널명을 입력하면 최신 영상 목록을 보여주고, 선택한 영상을 MP3로 다운로드합니다.
 """
 
 import os
-import sys
-import subprocess
+import streamlit as st
 from typing import List, Dict
-import json
+import time
+import io
 
 try:
     from yt_dlp import YoutubeDL
 except ImportError:
-    print("yt-dlp가 설치되어 있지 않습니다. 'pip install yt-dlp'를 실행해주세요.")
-    sys.exit(1)
+    st.error("yt-dlp가 설치되어 있지 않습니다. 'pip install yt-dlp'를 실행해주세요.")
+    st.stop()
 
 
 class YouTubeAudioDownloader:
@@ -31,14 +31,7 @@ class YouTubeAudioDownloader:
             os.makedirs(download_dir)
         
         # yt-dlp 옵션 설정
-        # FFmpeg 경로 설정
-        ffmpeg_path = r"C:\ffmpeg\bin"
-        if os.path.exists(os.path.join(ffmpeg_path, "ffmpeg.exe")):
-            ffmpeg_location = ffmpeg_path
-        else:
-            # PATH에서 찾기 시도
-            ffmpeg_location = None
-        
+        # Streamlit Cloud에서는 FFmpeg가 PATH에 있을 것으로 예상
         self.ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -47,28 +40,20 @@ class YouTubeAudioDownloader:
                 'preferredquality': '192',
             }],
             'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'),
-            # 기본 진행 표시를 끄고, 커스텀 진행 표시를 사용
             'quiet': True,
             'no_warnings': False,
             'noprogress': True,
             'progress_hooks': [],
             'postprocessor_hooks': [],
         }
-        
-        # FFmpeg 경로가 있으면 추가
-        if ffmpeg_location:
-            self.ydl_opts['ffmpeg_location'] = ffmpeg_location
 
         # 진행 표시 훅 연결
         self.ydl_opts['progress_hooks'].append(self._progress_hook)
         self.ydl_opts['postprocessor_hooks'].append(self._postprocessor_hook)
-
-    def _print_inline(self, text: str):
-        """한 줄 진행상황을 덮어쓰며 출력"""
-        try:
-            print(f"\r{text}", end='', flush=True)
-        except Exception:
-            print(text)
+        
+        # Streamlit 세션 상태에 진행상황 저장용
+        if 'progress' not in st.session_state:
+            st.session_state.progress = None
 
     def _progress_hook(self, status_dict: Dict):
         """다운로드 진행상황 표시 훅"""
@@ -79,24 +64,30 @@ class YouTubeAudioDownloader:
             percent = (downloaded / total * 100) if total else 0.0
             speed = status_dict.get('speed')
             eta = status_dict.get('eta')
-            speed_str = f"{speed/1024/1024:.2f}MiB/s" if speed else "-"
-            eta_str = f"{int(eta)}s" if eta else "-"
-            self._print_inline(f"다운로드 중: {percent:5.1f}%  속도: {speed_str}  남은시간: {eta_str}   ")
+            
+            # 세션 상태에 저장
+            st.session_state.progress = {
+                'percent': percent,
+                'speed': speed,
+                'eta': eta,
+                'downloaded': downloaded,
+                'total': total
+            }
         elif status == 'finished':
-            print("\n다운로드 완료. 오디오 변환을 시작합니다...")
+            st.session_state.progress = {'status': 'converting'}
         elif status == 'error':
-            print("\n다운로드 중 오류가 발생했습니다.")
+            st.session_state.progress = {'status': 'error'}
 
     def _postprocessor_hook(self, pp_dict: Dict):
-        """후처리(오디오 변환) 진행 힌트 표시 훅"""
+        """후처리(오디오 변환) 진행 표시 훅"""
         status = pp_dict.get('status')
         pp = pp_dict.get('postprocessor')
         if status == 'started' and pp == 'FFmpegExtractAudio':
-            self._print_inline("오디오 변환 중...  ")
+            st.session_state.progress = {'status': 'converting'}
         elif status == 'finished' and pp == 'FFmpegExtractAudio':
-            print("\n오디오 변환 완료.")
+            st.session_state.progress = {'status': 'completed'}
     
-    def get_channel_videos(self, channel_name: str, max_results: int = 20) -> List[Dict]:
+    def get_channel_videos(self, channel_name: str, max_results: int = 10) -> List[Dict]:
         """
         채널명으로 최신 영상 목록 가져오기
         
@@ -107,8 +98,6 @@ class YouTubeAudioDownloader:
         Returns:
             영상 정보 리스트
         """
-        print(f"\n'{channel_name}' 채널의 최신 영상을 검색 중...")
-        
         search_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -136,19 +125,16 @@ class YouTubeAudioDownloader:
                                     else:
                                         channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
                                 else:
-                                    # 채널 ID인 경우
                                     channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
                             elif channel_name_found:
-                                # 채널명으로 시도
                                 channel_url = f"https://www.youtube.com/c/{channel_name_found}/videos"
                             else:
                                 channel_url = None
                             
                             if channel_url:
-                                print(f"채널 URL: {channel_url}")
                                 return self._get_videos_from_url(channel_url, max_results)
                 except Exception as e:
-                    print(f"채널 검색 시도 1 실패: {e}")
+                    pass
                 
                 # 방법 2: 직접 채널 URL 시도
                 possible_urls = [
@@ -160,22 +146,19 @@ class YouTubeAudioDownloader:
                 
                 for url in possible_urls:
                     try:
-                        print(f"URL 시도: {url}")
                         videos = self._get_videos_from_url(url, max_results)
                         if videos:
                             return videos
-                    except Exception as e:
+                    except Exception:
                         continue
                 
-                print(f"\n채널을 찾을 수 없습니다. 채널 URL을 직접 입력해주세요.")
-                print("예: https://www.youtube.com/@channelname/videos")
                 return []
                 
         except Exception as e:
-            print(f"오류 발생: {e}")
+            st.error(f"오류 발생: {e}")
             return []
     
-    def _get_videos_from_url(self, channel_url: str, max_results: int = 20) -> List[Dict]:
+    def _get_videos_from_url(self, channel_url: str, max_results: int = 10) -> List[Dict]:
         """채널 URL로부터 영상 목록 가져오기"""
         channel_opts = {
             'quiet': True,
@@ -214,9 +197,7 @@ class YouTubeAudioDownloader:
         if not seconds:
             return "알 수 없음"
         
-        # float를 int로 변환
         seconds = int(float(seconds))
-        
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         secs = seconds % 60
@@ -226,22 +207,7 @@ class YouTubeAudioDownloader:
         else:
             return f"{minutes}:{secs:02d}"
     
-    def display_videos(self, videos: List[Dict]):
-        """영상 목록 출력"""
-        if not videos:
-            print("\n영상을 찾을 수 없습니다.")
-            return
-        
-        print(f"\n{'='*80}")
-        print(f"총 {len(videos)}개의 영상을 찾았습니다:")
-        print(f"{'='*80}\n")
-        
-        for video in videos:
-            duration_str = self.format_duration(video.get('duration', 0))
-            print(f"[{video['index']}] {video['title']}")
-            print(f"     길이: {duration_str}")
-            print(f"     URL: {video['url']}")
-            print()
+    
     
     def download_video(self, video_url: str, video_title: str = ""):
         """
@@ -250,97 +216,238 @@ class YouTubeAudioDownloader:
         Args:
             video_url: 다운로드할 영상 URL
             video_title: 영상 제목 (로그용)
-        """
-        print(f"\n다운로드 중: {video_title if video_title else video_url}")
         
+        Returns:
+            다운로드된 파일 경로 (성공 시)
+        """
         try:
+            st.session_state.progress = {'status': 'downloading', 'percent': 0}
             with YoutubeDL(self.ydl_opts) as ydl:
                 ydl.download([video_url])
-            print(f"✓ 다운로드 완료: {video_title}")
+            
+            # 다운로드된 파일 찾기
+            files = os.listdir(self.download_dir)
+            mp3_files = [f for f in files if f.endswith('.mp3')]
+            
+            # 가장 최근 파일 찾기 (간단히 정렬)
+            if mp3_files:
+                mp3_files.sort(key=lambda x: os.path.getmtime(os.path.join(self.download_dir, x)), reverse=True)
+                return os.path.join(self.download_dir, mp3_files[0])
+            
+            return None
         except Exception as e:
-            print(f"✗ 다운로드 실패: {e}")
-    
-    def run(self):
-        """메인 실행 함수"""
-        print("="*80)
-        print("유튜브 채널 영상 MP3 다운로더")
-        print("="*80)
-        
-        # 채널명 입력
-        channel_name = input("\n유튜브 채널명 또는 채널 URL을 입력하세요: ").strip()
-        
-        if not channel_name:
-            print("채널명이 입력되지 않았습니다.")
-            return
-        
-        # 채널 URL인 경우 직접 사용
-        if channel_name.startswith('http'):
-            print("\n채널 URL로부터 영상 목록을 가져오는 중...")
-            videos = self._get_videos_from_url(channel_name, max_results=20)
-            
-            if not videos:
-                print("영상을 찾을 수 없습니다. 채널 URL을 확인해주세요.")
-                return
-            
-            self.display_videos(videos)
-        else:
-            # 채널명으로 검색
-            videos = self.get_channel_videos(channel_name, max_results=20)
-            
-            if not videos:
-                print("\n영상을 찾을 수 없습니다. 채널명을 확인하거나 채널 URL을 직접 입력해주세요.")
-                print("예: https://www.youtube.com/@channelname/videos")
-                return
-            
-            self.display_videos(videos)
-        
-        # 영상 선택
-        print(f"\n다운로드할 영상을 선택하세요 (숫자 입력, 여러 개는 쉼표로 구분, 예: 1,3,5 또는 'all' 전체 다운로드)")
-        print("나가려면 'q'를 입력하세요.")
-        
-        selection = input("\n선택: ").strip().lower()
-        
-        if selection == 'q':
-            print("프로그램을 종료합니다.")
-            return
-        
-        if selection == 'all':
-            selected_indices = list(range(1, len(videos) + 1))
-        else:
-            try:
-                selected_indices = [int(x.strip()) for x in selection.split(',')]
-            except ValueError:
-                print("잘못된 입력입니다.")
-                return
-        
-        # 선택된 영상 다운로드
-        selected_videos = [v for v in videos if v['index'] in selected_indices]
-        
-        if not selected_videos:
-            print("선택한 영상이 없습니다.")
-            return
-        
-        print(f"\n{len(selected_videos)}개의 영상을 다운로드합니다...")
-        
-        for video in selected_videos:
-            self.download_video(video['url'], video['title'])
-        
-        print(f"\n모든 다운로드가 완료되었습니다!")
-        print(f"파일은 '{self.download_dir}' 폴더에 저장되었습니다.")
+            st.error(f"다운로드 실패: {e}")
+            return None
 
 
 def main():
-    """메인 함수"""
-    downloader = YouTubeAudioDownloader()
+    """Streamlit 메인 앱"""
+    st.set_page_config(
+        page_title="유튜브 MP3 다운로더",
+        page_icon="🎵",
+        layout="wide"
+    )
     
-    try:
-        downloader.run()
-    except KeyboardInterrupt:
-        print("\n\n프로그램이 중단되었습니다.")
-    except Exception as e:
-        print(f"\n오류 발생: {e}")
-        import traceback
-        traceback.print_exc()
+    st.title("🎵 유튜브 채널 영상 MP3 다운로더")
+    st.markdown("---")
+    
+    # 세션 상태 초기화
+    if 'videos' not in st.session_state:
+        st.session_state.videos = None
+    if 'downloader' not in st.session_state:
+        st.session_state.downloader = YouTubeAudioDownloader()
+    
+    downloader = st.session_state.downloader
+    
+    # 사이드바
+    with st.sidebar:
+        st.header("⚙️ 설정")
+        st.info("""
+        **사용 방법:**
+        1. 채널명 또는 채널 URL 입력
+        2. 영상 목록 확인
+        3. 다운로드할 영상 선택
+        4. 다운로드 버튼 클릭
+        """)
+        st.markdown("---")
+        st.caption("💡 **팁:** 채널 URL을 직접 입력하면 더 정확합니다")
+        st.caption("예: `https://www.youtube.com/@channelname/videos`")
+    
+    # 채널 검색 섹션
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # 세션 상태로 입력값 관리
+        if 'channel_input_value' not in st.session_state:
+            st.session_state.channel_input_value = ""
+        if 'input_key' not in st.session_state:
+            st.session_state.input_key = 0
+        
+        channel_input = st.text_input(
+            "채널명 또는 채널 URL 입력",
+            value=st.session_state.channel_input_value,
+            placeholder="예: TED 또는 https://www.youtube.com/@TED/videos",
+            key=f"channel_input_{st.session_state.input_key}"
+        )
+    
+    with col2:
+        st.write("")  # 간격 맞추기
+        search_button = st.button("🔍 검색", type="primary", use_container_width=True)
+    
+    # 자주 쓰는 채널 빠른 선택 버튼 (URL 사용 - 더 빠름)
+    st.markdown("### ⚡ 자주 쓰는 채널")
+    quick_channel_epz = st.button("📻 English Podcast Zone", use_container_width=True)
+    quick_channel_bob = st.button("📺 Learn English with Bob the Canadian", use_container_width=True)
+
+    # 공통 핸들러
+    def quick_search(channel_url: str, fallback_name: str):
+        with st.spinner("채널을 검색하는 중..."):
+            try:
+                videos = downloader._get_videos_from_url(channel_url, max_results=10)
+                if not videos:
+                    videos = downloader.get_channel_videos(fallback_name, max_results=10)
+                if videos:
+                    st.session_state.videos = videos
+                    st.success(f"✅ {len(videos)}개의 영상을 찾았습니다!")
+                    st.session_state.channel_input_value = ""
+                    st.session_state.input_key += 1  # 입력창 key 변경으로 강제 재생성
+                    st.rerun()
+                else:
+                    st.error("❌ 영상을 찾을 수 없습니다.")
+                    st.session_state.videos = None
+                    st.rerun()
+            except Exception as e:
+                st.error(f"오류 발생: {e}")
+                st.session_state.videos = None
+
+    # 빠른 선택 버튼 클릭 시 자동 검색 (URL 직접 사용으로 더 빠름)
+    if quick_channel_epz:
+        quick_search(
+            channel_url="https://www.youtube.com/@EnglishPodcastZone/videos",
+            fallback_name="English Podcast Zone",
+        )
+    if quick_channel_bob:
+        quick_search(
+            channel_url="https://www.youtube.com/@LearnEnglishwithBobtheCanadian/videos",
+            fallback_name="Learn English with Bob the Canadian",
+        )
+    
+    # 영상 검색 실행 (일반 검색 버튼)
+    if search_button and channel_input:
+        # 검색어 저장
+        search_term = channel_input
+        
+        with st.spinner("채널을 검색하는 중..."):
+            try:
+                if search_term.startswith('http'):
+                    videos = downloader._get_videos_from_url(search_term, max_results=10)
+                else:
+                    videos = downloader.get_channel_videos(search_term, max_results=10)
+                
+                # 검색 완료 후 입력창 초기화
+                st.session_state.channel_input_value = ""
+                st.session_state.input_key += 1  # 입력창 key 변경으로 강제 재생성
+                
+                if videos:
+                    st.session_state.videos = videos
+                    st.success(f"✅ {len(videos)}개의 영상을 찾았습니다!")
+                else:
+                    st.error("❌ 영상을 찾을 수 없습니다. 채널명 또는 URL을 확인해주세요.")
+                    st.session_state.videos = None
+                
+                # 페이지 재로드로 입력창 초기화 확실히 적용
+                st.rerun()
+            except Exception as e:
+                # 오류 발생 시에도 입력창 초기화
+                st.session_state.channel_input_value = ""
+                st.session_state.input_key += 1
+                st.error(f"오류 발생: {e}")
+                st.session_state.videos = None
+                st.rerun()
+    
+    # 영상 목록 표시
+    if st.session_state.videos:
+        st.markdown("---")
+        st.subheader(f"📹 영상 목록 ({len(st.session_state.videos)}개)")
+        
+        # 영상 선택
+        selected_videos = []
+        videos_container = st.container()
+        
+        with videos_container:
+            for video in st.session_state.videos:
+                col1, col2, col3 = st.columns([1, 5, 1])
+                
+                with col1:
+                    checkbox_key = f"video_{video['id']}"
+                    if st.checkbox("선택", key=checkbox_key, label_visibility="hidden"):
+                        selected_videos.append(video)
+                
+                with col2:
+                    duration_str = downloader.format_duration(video.get('duration', 0))
+                    st.markdown(f"<h4 style='margin-bottom: 5px;'>{video['title']}</h4>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='font-size: 16px; color: #666; margin-top: 5px;'>⏱️ {duration_str} | 🔗 <a href='{video['url']}' target='_blank'>YouTube 보기</a></p>", unsafe_allow_html=True)
+                
+                with col3:
+                    video_num = video['index']
+                    st.markdown(f"<h4 style='text-align: center; color: #888;'>#{video_num}</h4>", unsafe_allow_html=True)
+                
+                st.markdown("---")
+        
+        # 다운로드 버튼
+        if selected_videos:
+            st.markdown("---")
+            st.subheader(f"📥 다운로드 ({len(selected_videos)}개 선택됨)")
+            
+            if st.button("⬇️ 선택한 영상 다운로드", type="primary", use_container_width=True):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                downloaded_files_list = []
+                
+                for idx, video in enumerate(selected_videos):
+                    status_text.info(f"📥 다운로드 중: {video['title']}")
+                    progress_bar.progress((idx + 1) / len(selected_videos))
+                    
+                    downloaded_file = downloader.download_video(video['url'], video['title'])
+                    
+                    if downloaded_file:
+                        downloaded_files_list.append({
+                            'title': video['title'],
+                            'path': downloaded_file,
+                            'filename': os.path.basename(downloaded_file)
+                        })
+                
+                progress_bar.empty()
+                status_text.success("✅ 모든 다운로드가 완료되었습니다!")
+                
+                # 다운로드된 파일 목록 표시
+                if downloaded_files_list:
+                    st.markdown("### 📁 다운로드 완료된 파일")
+                    for file_info in downloaded_files_list:
+                        file_path_abs = os.path.abspath(file_info['path'])
+                        col1, col2 = st.columns([3, 1])
+                        
+                        with col1:
+                            st.markdown(f"**{file_info['title']}**")
+                            st.code(file_path_abs, language=None)
+                        
+                        with col2:
+                            # 파일 읽기 및 다운로드 버튼 제공
+                            try:
+                                with open(file_info['path'], 'rb') as f:
+                                    file_data = f.read()
+                                
+                                st.download_button(
+                                    label="💾 다운로드",
+                                    data=file_data,
+                                    file_name=file_info['filename'],
+                                    mime="audio/mpeg",
+                                    key=f"download_btn_{file_info['filename']}"
+                                )
+                            except Exception as e:
+                                st.error(f"파일 읽기 오류: {e}")
+                        
+                        st.markdown("---")
 
 
 if __name__ == "__main__":
