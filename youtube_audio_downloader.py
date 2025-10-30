@@ -10,6 +10,8 @@ import streamlit as st
 from typing import List, Dict
 import time
 import io
+import unicodedata
+import re
 
 try:
     from yt_dlp import YoutubeDL
@@ -54,6 +56,32 @@ class YouTubeAudioDownloader:
         # Streamlit 세션 상태에 진행상황 저장용
         if 'progress' not in st.session_state:
             st.session_state.progress = None
+
+    def _normalize_visible_text(self, text: str) -> str:
+        """유니코드 수학 볼드 등 특수 스타일 문자를 일반 문자로 정규화."""
+        if not text:
+            return ""
+        # NFKD 정규화로 호환 분해 후 결합 부호 제거
+        decomposed = unicodedata.normalize('NFKD', text)
+        without_marks = ''.join(c for c in decomposed if unicodedata.category(c) != 'Mn')
+        # 가시성 향상을 위해 공백 정리
+        normalized_spaces = re.sub(r"\s+", " ", without_marks).strip()
+        return normalized_spaces
+
+    def _make_filesafe_title(self, title: str) -> str:
+        """Windows에서도 안전한 파일명으로 변환."""
+        base = self._normalize_visible_text(title) or "audio"
+        # 금지 문자 제거
+        base = re.sub(r"[<>:\\/\\|?*\"]", " ", base)
+        # 제어 문자 제거
+        base = ''.join(ch for ch in base if ch >= ' ')
+        # 앞뒤 공백/점 제거, 연속 공백 축소
+        base = re.sub(r"\s+", " ", base).strip().rstrip('.')
+        # 길이 제한
+        if len(base) > 150:
+            base = base[:150].rstrip()
+        # 빈 문자열 방지
+        return base or "audio"
 
     def _progress_hook(self, status_dict: Dict):
         """다운로드 진행상황 표시 훅"""
@@ -222,18 +250,22 @@ class YouTubeAudioDownloader:
         """
         try:
             st.session_state.progress = {'status': 'downloading', 'percent': 0}
-            with YoutubeDL(self.ydl_opts) as ydl:
+            # 파일명 안전화 적용
+            safe_title = self._make_filesafe_title(video_title or "")
+            ydl_opts_local = dict(self.ydl_opts)
+            ydl_opts_local['outtmpl'] = os.path.join(self.download_dir, f"{safe_title}.%(ext)s")
+            with YoutubeDL(ydl_opts_local) as ydl:
                 ydl.download([video_url])
-            
-            # 다운로드된 파일 찾기
+            # 예상 경로 우선 반환
+            expected_path = os.path.join(self.download_dir, f"{safe_title}.mp3")
+            if os.path.exists(expected_path):
+                return expected_path
+            # 폴백: 가장 최근 mp3 파일
             files = os.listdir(self.download_dir)
             mp3_files = [f for f in files if f.endswith('.mp3')]
-            
-            # 가장 최근 파일 찾기 (간단히 정렬)
             if mp3_files:
                 mp3_files.sort(key=lambda x: os.path.getmtime(os.path.join(self.download_dir, x)), reverse=True)
                 return os.path.join(self.download_dir, mp3_files[0])
-            
             return None
         except Exception as e:
             st.error(f"다운로드 실패: {e}")
@@ -385,12 +417,15 @@ def main():
                 
                 with col2:
                     duration_str = downloader.format_duration(video.get('duration', 0))
-                    st.markdown(f"<h4 style='margin-bottom: 5px;'>{video['title']}</h4>", unsafe_allow_html=True)
-                    st.markdown(f"<p style='font-size: 16px; color: #666; margin-top: 5px;'>⏱️ {duration_str} | 🔗 <a href='{video['url']}' target='_blank'>YouTube 보기</a></p>", unsafe_allow_html=True)
+                    # 제목을 기본 폰트/기본 굵기로 보이도록 정규화하여 출력
+                    title_norm = unicodedata.normalize('NFKD', video['title'])
+                    title_norm = ''.join(c for c in title_norm if unicodedata.category(c) != 'Mn')
+                    st.markdown(f"<div style='font-size: 20px; font-weight: 400; margin-bottom: 5px;'>{title_norm}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='color: #666; margin-top: 5px;'>⏱️ {duration_str} | 🔗 <a href='{video['url']}' target='_blank'>YouTube 보기</a></p>", unsafe_allow_html=True)
                 
                 with col3:
                     video_num = video['index']
-                    st.markdown(f"<h4 style='text-align: center; color: #888;'>#{video_num}</h4>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='text-align: center; color: #888;'>#{video_num}</div>", unsafe_allow_html=True)
                 
                 st.markdown("---")
         
@@ -411,8 +446,9 @@ def main():
                     downloaded_file = downloader.download_video(video['url'], video['title'])
                     
                     if downloaded_file:
+                        title_display = downloader._normalize_visible_text(video['title'])
                         downloaded_files_list.append({
-                            'title': video['title'],
+                            'title': title_display,
                             'path': downloaded_file,
                             'filename': os.path.basename(downloaded_file)
                         })
